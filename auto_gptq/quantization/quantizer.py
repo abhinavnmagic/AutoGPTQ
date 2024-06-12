@@ -2,7 +2,7 @@ from logging import getLogger
 
 import torch
 import torch.nn as nn
-
+from hqq.core.optimize import optimize_weights_proximal_slow
 
 logger = getLogger(__name__)
 
@@ -42,7 +42,7 @@ class Quantizer(nn.Module):
         if trits:
             self.maxq = torch.tensor(-1)
 
-    def find_params(self, x, weight=False):
+    def find_params(self, x, weight=False, solve=None):
         dev = x.device
         self.maxq = self.maxq.to(dev)
 
@@ -84,7 +84,47 @@ class Quantizer(nn.Module):
             else:
                 self.zero = torch.round(-xmin / self.scale)
 
-        if self.mse:
+        if solve is not None:
+            if self.mse == 'marlin': # original marlin
+                best = torch.full([x.shape[0]], float('inf'), device=dev)
+                for i in range(int(self.maxshrink * self.grid) + 1):
+                    p = 1 - i / self.grid
+                    clip = p * torch.max(xmax, torch.abs(xmin))
+                    xmax1 = torch.min(xmax, +clip)
+                    xmin1 = torch.max(xmin, -clip)
+                    scale1 = (xmax1 - xmin1) / self.maxq
+                    zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
+                    q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
+                    delta = q - x
+                    err = torch.sum(torch.linalg.solve_triangular(solve, delta, upper=True, left=False) ** 2, 1)
+                    tmp = err < best
+                    if torch.any(tmp):
+                        best[tmp] = err[tmp]
+                        self.scale[tmp] = scale1[tmp]
+                        self.zero[tmp] = zero1[tmp]
+            elif self.mse == "hqq":
+                grid = self.grid * 2
+                best = torch.full([x.shape[0]], float('inf'), device=dev)
+                for _ in range(5):
+                    _, _, self.zero = optimize_weights_proximal_slow(tensor=x, axis=1, zero=self.zero.unsqueeze(1), scale=self.scale.unsqueeze(1), min_max=[0, self.maxq])
+                    self.zero.squeeze_()
+                    s = (2*self.maxshrink) / (grid - 1)
+                    for i in range(grid):
+                        p = i * s + (1-self.maxshrink)
+                        clip = p * torch.max(xmax, torch.abs(xmin))
+                        xmax1 = torch.min(xmax, +clip)
+                        xmin1 = torch.max(xmin, -clip)
+                        scale1 = (xmax1 - xmin1) / self.maxq
+                        zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
+                        q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
+                        delta = q - x
+                        err = torch.sum(torch.linalg.solve_triangular(solve, delta, upper=True, left=False) ** 2, 1)
+                        tmp = err < best
+                        if torch.any(tmp):
+                            best[tmp] = err[tmp]
+                            self.scale[tmp] = scale1[tmp]
+                            self.zero[tmp] = zero1[tmp]
+        elif self.mse:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid

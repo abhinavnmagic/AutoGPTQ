@@ -135,7 +135,8 @@ class GPTQ:
                 if group_size != -1:
                     if not static_groups:
                         if (i1 + i) % group_size == 0:
-                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + group_size)], weight=True)
+                            self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + group_size)], weight=True,
+                            solve=Hinv[(i1 + i) : (i1 + i + group_size), (i1 + i) : (i1 + i + group_size)])
 
                         if ((i1 + i) // group_size) - now_idx == -1:
                             scale.append(self.quantizer.scale)
